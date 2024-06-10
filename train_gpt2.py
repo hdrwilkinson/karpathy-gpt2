@@ -15,6 +15,14 @@ class GPTConfig:
     n_nead: int = 12            # Number of attention heads
     n_embed: int = 768          # Embedding size for each token (otherwise known as channels)
 
+    """
+    The vocab size for GPT is built from:
+    
+    - 50,000 BPE merges
+    - 256 byte tokens
+    - 1<|endoftext|> token that both starts and ends the text
+    """
+
 class GPT(nn.Module):
 
     def __init__(self, config: GPTConfig):
