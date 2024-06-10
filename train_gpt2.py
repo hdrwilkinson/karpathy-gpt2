@@ -66,6 +66,21 @@ class MLP(nn.Module):
         self.fc1 = nn.Linear(config.n_embed, 4 * config.n_embed)
         self.gelu = nn.GELU(approximate='tanh')
         self.c_proj = nn.Linear(4 * config.n_embed, config.n_embed)
+        
+        '''
+        GELU: Gaussian Error Linear Unit
+        
+        The approximate eq:
+            GELU(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3))\
+        
+        The exact eq:
+            GELU(x) = x * P(X <= x) = 0.5 * x * (1 + erf(x / sqrt(2)))
+            
+        The reason for the approximation is that the exact GELU function is computationally expensive.
+        In GPT2, the approximation is used. However, in GPT3, the exact GELU function is used. This is because
+        GPT3 is trained on a supercomputer with 175 billion parameters, so the computational cost is not an issue.
+        Additionally, the exact GELU function is more accurate than the approximate GELU function and is now easier
+        to compute with the advent of faster hardware.'''
 
     def forward(self, x):
         x = self.fc1(x)
