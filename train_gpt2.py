@@ -9,11 +9,11 @@ import math
 
 @dataclass
 class GPTConfig:
-    block_size: int = 256       # Number of tokens in each block (or sequence length)
-    vocab_size: int = 65        # Number of unique tokens in the vocabulary
-    n_layer: int = 6            # Number of layers in the transformer
-    n_nead: int = 6             # Number of attention heads
-    n_embed: int = 384          # Embedding size for each token (otherwise known as channels)
+    block_size: int = 1024      # Number of tokens in each block (or sequence length)
+    vocab_size: int = 50257     # Number of unique tokens in the vocabulary
+    n_layer: int = 12           # Number of layers in the transformer
+    n_nead: int = 12            # Number of attention heads
+    n_embed: int = 768          # Embedding size for each token (otherwise known as channels)
 
 class GPT(nn.Module):
 
