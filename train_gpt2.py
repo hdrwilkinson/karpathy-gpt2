@@ -30,8 +30,28 @@ class GPT(nn.Module):
                 h = nn.ModuleList( # ModuleList is a list that contains nn.Module objects (indexable)
                     [GPTBlock(config) for _ in range(config.n_layer)]           # n_layer Transformer Blocks
                 ),
-                ln_f = nn.LayerNorm(config.n_embed),                            # Layer Normalization
+                ln_f = nn.LayerNorm(config.n_embed),                            # Layer Normalization (for final output)
                 # Output Layer
                 head = nn.Linear(config.n_embed, config.vocab_size, bias=False) # Embedding -> Vocab
             )
         )
+
+class GPTBlock(nn.Module):
+    
+    def __init__(self, config):
+        super.__init__()
+        self.config = config
+
+        # Multi-Head Self-Attention Layer
+        self.ln_1 = nn.LayerNorm(config.n_embed) # Layer Normalization (before attention)
+        self.attn = CausalSelfAttention(config) # Self-Attention Layer
+        self.ln_2 = nn.LayerNorm(config.n_embed)
+        # Feed-Forward Layer
+        self.mpl = MLP(config)
+
+    def forward(self, x):
+        # Add & Norm: x -> Attention -> x -> Feed-Forward -> x
+        x = x + self.attn(self.ln_1(x))
+        x = x + self.mlp(self.ln_2(x))
+
+        return x
