@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn # This is the module that contains the neural network layers
 from torch.nn import functional as F # This is the module that contains the activation functions
+import math
 
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -40,7 +41,6 @@ class GPTBlock(nn.Module):
     
     def __init__(self, config):
         super.__init__()
-        self.config = config
 
         # Multi-Head Self-Attention Layer
         self.ln_1 = nn.LayerNorm(config.n_embed) # Layer Normalization (before attention)
@@ -60,13 +60,12 @@ class MLP(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.config = config
 
         # Fully-Connected Layers
         self.fc1 = nn.Linear(config.n_embed, 4 * config.n_embed)
         self.gelu = nn.GELU(approximate='tanh')
         self.c_proj = nn.Linear(4 * config.n_embed, config.n_embed)
-        
+
         '''
         GELU: Gaussian Error Linear Unit
         
@@ -88,3 +87,87 @@ class MLP(nn.Module):
         x = self.c_proj(x)
 
         return x
+    
+class CausalSelfAttention(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+        self.n_head = config.n_head
+        self.n_embed = config.n_embed
+
+        assert self.n_embed % self.n_head == 0, "n_embed must be divisible by n_head"
+
+        """
+        Splitting the Query, Key, and Value Matrices:
+        
+        The attention mechanism is a matrix operation that is applied to the Query, Key, and Value matrices.
+        The Query, Key, and Value matrices are multiplied by the attention weights to produce the output.
+        
+        It can be done as a batch operation. This is done by stacking the Query, Key, and Value matrices along the batch
+        dimension. This allows us to process multiple inputs at the same time.
+        """
+
+        # Query, Key, and Value Matrices (in a batch)
+        self.c_attn = nn.Linear(self.n_embed, 3 * self.n_embed)
+        # Output Matrix
+        self.c_proj = nn.Linear(self.n_embed, self.n_embed)
+        # Regularization
+        self.register_buffer("bias", 
+            torch.tril(
+                torch.ones(config.block_size, config.block_size))
+                .view(1, 1, config.block_size, config.block_size)
+        )
+
+    def forward(self, x):
+        B, T, C = x.size()
+        # B = batch size
+        # T = sequence length
+        # C = number of channels (embedding size)
+        assert C == self.n_embed, "Input size does not match n_embed"
+
+        """
+        Method for splitting the QKV matrix:
+        
+        The QKV matrix is a 3D tensor with shape (B, T, 3 * C), where B is the batch size, T is the sequence length,
+        and C is the number of channels (embedding size). The QKV matrix is split along the last dimension (dim=2) into
+        three matrices: Q, K, and V. The Q matrix contains the Query vectors, the K matrix contains the Key vectors,
+        and the V matrix contains the Value vectors.
+        
+        The split operation is done using the split() method. The split() method takes two arguments: the size of the
+        split dimension and the dimension along which to split the tensor.
+
+        The view() method is used to reshape the QKV matrix into three separate matrices: Q, K, and V. The view() method
+        takes the new shape of the tensor as its argument. The new shape is specified as a tuple of the dimensions of the
+        reshaped tensor.
+        """
+        qkv = self.c_attn(x)
+        # Splitting the QKV matrix
+        q, k, v = qkv.split(self.n_embed, dim=2) 
+        # Reshaping the QKV matrix
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        # Self-Attention
+        y = self.self_attention(q, k, v)
+        # Output Matrix
+        y = self.c_proj(y)
+
+        return y
+
+    def self_attention(self, q, k, v):
+        B, T, C = q.size()
+        # Attention Weights
+        att = (q @ k.transpose(-2, -1)) / (1.0 / math.sqrt(k.size(-1)))
+        # Masking the Attention Weights
+        att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
+        # Softmax Activation
+        att = F.softmax(att, dim=-1)
+        # Weighted Sum
+        y = att @ v # (B, nh, T, T) @ (B, nh, T, hs) -> (B, nh, T, hs)
+        # Reshaping the Output
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
+
+        return y
+
+
+        
