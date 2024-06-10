@@ -45,6 +45,56 @@ class GPT(nn.Module):
             )
         )
 
+    @classmethod
+    def from_pretrained(self, cls, model_type: str):
+        """Loads pre-trained model weights from Hugging Face."""
+        assert model_type in ["gpt2", "gpt2-medium", "gpt2-large", "gpt2-xl"], "Invalid model type"
+
+        from transformers import GPT2LMHeadModel
+        print(f"Loading weights from pre-trained model: {model_type}")
+
+        # Specify the configuration arguments for each model type
+        config_args = {
+            "gpt2":         dict(n_layer=12, n_head=12, n_embed=768),  # 124M parameters
+            "gpt2-medium":  dict(n_layer=24, n_head=16, n_embed=1024), # 350M parameters
+            "gpt2-large":   dict(n_layer=36, n_head=20, n_embed=1280), # 774M parameters
+            "gpt2-xl":      dict(n_layer=48, n_head=25, n_embed=1600), # 1558M parameters
+        }[model_type]
+        config_args["vocab_size"] = 50257
+        config_args["block_size"] = 1024
+
+        # Initialize the GPT model
+        config = cls(GPTConfig(**config_args))
+        model = GPT(config)
+        state_dict = model.state_dict()
+        state_dict_keys = state_dict.keys()
+        state_dict_keys = [k for k in state_dict_keys if not k.endswith(".attn.bias")] # Not required as used for auto-regressive mask
+
+        # Initialise a pre-trained GPT2 model from Hugging Face
+        hf_model = GPT2LMHeadModel.from_pretrained(model_type)
+        hf_state_dict = hf_model.state_dict()
+        
+        # Check if the state dict keys match
+        hf_state_dict_keys = hf_state_dict.keys()
+        hf_state_dict_keys = [k for k in hf_state_dict_keys if not k.endswith(".attn.masked_bias")]
+        hf_state_dict_keys = [k for k in hf_state_dict_keys if not k.endswith(".attn.bias")]
+
+        # Transpose the required weights - why?
+        #       The openai checkpoints use a "Conv1D" module, but we only want to use a vanilla Linear
+        #       this means that we have to transpose these weights when we import them
+        transposed = ['attn.c_attn.weight', 'attn.c_proj.weight', 'mlp.c_fc.weight', 'mlp.c_proj.weight']
+        for k in hf_state_dict_keys:
+            if any(k.endswith(w) for w in transposed):
+                assert hf_state_dict[k].shape[::-1] == state_dict[k].shape
+                with torch.no_grad():
+                    state_dict[k].copy_(hf_state_dict[k].t())
+            else:
+                assert hf_state_dict[k].shape == state_dict[k].shape
+                with torch.no_grad():
+                    state_dict[k].copy_(hf_state_dict[k])
+
+        return model
+
 class GPTBlock(nn.Module):
     
     def __init__(self, config):
