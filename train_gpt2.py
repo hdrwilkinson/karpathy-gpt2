@@ -364,15 +364,35 @@ if __name__ == "__main__":
     """ ---------- Getting a data batch ---------- """
     train_loader = DataLoaderLite(B=16, T=64) # Batch size (same) and sequence length ^
 
-    """ ---------- Enabling TF32 ---------- 
-    The mantissa (or significand) is the part of a floating-point number that 
-    represents the significant digits. Float32 uses a 23-bit mantissa, 
-    providing high precision but slower computation. TF32, used in NVIDIA GPUs, 
-    uses a 10-bit mantissa, which reduces precision slightly but speeds up 
-    calculations significantly. This makes TF32 more efficient for many deep 
-    learning tasks while maintaining enough precision for accurate results.
+    """ ---------- Lower precision -> Faster Computation ---------- 
+    Range (Exponent):
+        The exponent in floating-point numbers determines the range of values the number can 
+        represent. A larger exponent allows for a wider range of values. For instance, both 
+        float32 and TF32 have an 8-bit exponent, providing a range from approximately 10^-38 
+        to 10^38. BF16 also uses an 8-bit exponent, offering a similar range. FP16, with a 
+        5-bit exponent, has a more limited range from approximately 10^-5 to 10^5.
+
+    Mantissa (Significand):
+        The mantissa (or significand) determines the precision of the floating-point number. 
+        More bits in the mantissa mean higher precision but slower computations. The mantissa 
+        captures the significant digits of the number, with fewer bits leading to faster but 
+        less precise calculations.
+
+    Precision:
+      - FP32 (float32) uses a 23-bit mantissa and an 8-bit exponent. It offers high precision 
+        and a wide range, suitable for tasks requiring detailed calculations but is slower due 
+        to its high precision.
+      - TF32 uses a 10-bit mantissa and the same 8-bit exponent as FP32. It balances speed 
+        and precision, making it faster than FP32 while maintaining sufficient precision for 
+        many deep learning tasks.
+      - FP16 (float16) has a 10-bit mantissa and a 5-bit exponent. It provides lower 
+        precision and a more limited range, making it suitable for specific tasks where speed 
+        is critical, and precision requirements are lower.
+      - BF16 (bfloat16) has a 7-bit mantissa and an 8-bit exponent. It offers a wide range 
+        like FP32 and TF32 but with lower precision, providing fast computations while still 
+        covering a broad range of values. BF16 is efficient for training large models where extreme precision is less crucial.
     """
-    torch.set_float32_matmul_precision('high')
+    torch.set_float32_matmul_precision('medium') # Highest, High or Medium
 
     """ ---------- Loading the model ---------- """
     # Loading the GPT2 model
