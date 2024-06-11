@@ -270,10 +270,20 @@ class GPT(nn.Module):
     
 
 if __name__ == "__main__":
-    # Loading the model
-    model = GPT.from_pretrained("gpt2")
-    # config = GPTConfig()
-    # model = GPT(config)
+    # Detecting the device
+    device = "cpu"
+    if torch.cuda.is_available():
+        device = "cuda"
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        device = "mps"
+    print(f"Using device: {device}")
+
+    """ ---------- Loading the model ---------- """
+    # Loading the GPT2 model
+    # model = GPT.from_pretrained("gpt2")
+    # Randomly initializing the model 
+    config = GPTConfig()
+    model = GPT(config)
     print(model)
     print("Model loaded successfully!")
 
@@ -284,7 +294,7 @@ if __name__ == "__main__":
 
     # Setting model to eval and to cuda (if available)
     model.eval()
-    # model.to('cuda')
+    model.to(device)
 
     # Prefix tokens
     import tiktoken
@@ -292,15 +302,14 @@ if __name__ == "__main__":
     tokens = enc.encode("Hello, I'm a language model,")
     tokens = torch.tensor(tokens, dtype=torch.long)
     tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
-    # x = tokens.to('cuda')
+    x = tokens.to(device)
 
     # Inference
     torch.manual_seed(42)
     # torch.cuda.manual_seed(42)  
-    while tokens.size(1) < max_length:
+    while x.size(1) < max_length:
         with torch.no_grad():
-            print(tokens)
-            logits = model(tokens) # (B, T, vocab_size)
+            logits = model(x) # (B, T, vocab_size)
             # Take the logits at the last position
             logits = logits [:, -1, :] # (B, vocab_size)
             # Get the probabilities
@@ -312,10 +321,10 @@ if __name__ == "__main__":
             # Gather the corresponding indices
             xcol = torch.gather(topk_indicies, -1, ix) # (B, 1)
             # Append to sequence
-            tokens = torch.cat([tokens, xcol], dim=1)
+            x = torch.cat([x, xcol], dim=1)
 
     # Decode the tokens
     for i in range(num_return_sequences):
-        x = tokens[i, :max_length].tolist()
-        decoded = enc.decode(x)
+        tokens = x[i, :max_length].tolist()
+        decoded = enc.decode(tokens)
         print(">", decoded)
