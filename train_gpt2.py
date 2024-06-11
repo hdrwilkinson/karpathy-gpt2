@@ -195,7 +195,7 @@ class GPT(nn.Module):
         # Output Layer
         self.lm_head = nn.Linear(config.n_embed, config.vocab_size, bias=False)     # Embedding -> Vocab
 
-    def forward(self, idx):
+    def forward(self, idx, targets=None):
         B, T = idx.size()
         assert T <= self.config.block_size, f"Length {T} exceeds block size {self.config.block_size}"
 
@@ -213,7 +213,16 @@ class GPT(nn.Module):
         x = self.transformer.ln_f(x)
         logits = self.lm_head(x)
 
-        return logits
+        # Loss Calculation
+        loss = None
+        if targets is not None:
+            loss = F.cross_entropy(
+                # We flatten the logits and the targets to (B * T, vocab_size) as required by cross_entropy in PyTorch
+                logits.view(-1, self.config.vocab_size), 
+                targets.view(-1) # Note that this is not OHE
+            )
+
+        return logits, loss
 
     @classmethod
     def from_pretrained(cls, model_type: str):
@@ -267,7 +276,6 @@ class GPT(nn.Module):
                     state_dict_item.copy_(hf_state_dict_item)
 
         return model
-    
 
 if __name__ == "__main__":
     """ ---------- Detecting the device ---------- """
@@ -286,7 +294,7 @@ if __name__ == "__main__":
     text = text[:1024]
     tokens = enc.encode(text)
     B, T = 4, 32
-    buffer = torch.tensor(tokens[:B*T], dtype=torch.long)
+    buffer = torch.tensor(tokens[:B*T + 1], dtype=torch.long).to(device)
     x = buffer[:-1].view(B, T)
     y = buffer[1:].view(B, T)
 
@@ -296,8 +304,26 @@ if __name__ == "__main__":
     # Randomly initializing the model 
     config = GPTConfig()
     model = GPT(config)
+    model.to(device)
     print(model)
     print("Model loaded successfully!")
+
+    """ ---------- Get Logits ---------- """
+    logits, loss = model(x, y)
+    print(loss)
+
+    """ ---------- Optimizer and training ---------- """
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+    for i in range(50):
+        optimizer.zero_grad() # Zero the gradients - Why? Because PyTorch accumulates the gradients on subsequent backward passes
+        logits, loss = model(x, y)
+        loss.backward()
+        optimizer.step()
+        print(f"Step {i + 1} of 50. Loss: {loss.item()}")
+
+
+
+    import sys; sys.exit() # Ignores the rest of the code
 
     """ ---------- Inferencing the model ---------- """
     # Inference parameters
@@ -306,7 +332,6 @@ if __name__ == "__main__":
 
     # Setting model to eval and to cuda (if available)
     model.eval()
-    model.to(device)
 
     # Prefix tokens
     import tiktoken
