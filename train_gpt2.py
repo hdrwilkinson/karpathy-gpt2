@@ -364,6 +364,15 @@ if __name__ == "__main__":
     """ ---------- Getting a data batch ---------- """
     train_loader = DataLoaderLite(B=16, T=64) # Batch size (same) and sequence length ^
 
+    """ ---------- Enabling TF32 ---------- 
+    The mantissa (or significand) is the part of a floating-point number that 
+    represents the significant digits. Float32 uses a 23-bit mantissa, 
+    providing high precision but slower computation. TF32, used in NVIDIA GPUs, 
+    uses a 10-bit mantissa, which reduces precision slightly but speeds up 
+    calculations significantly. This makes TF32 more efficient for many deep 
+    learning tasks while maintaining enough precision for accurate results.
+    """
+    torch.set_float32_matmul_precision('high')
 
     """ ---------- Loading the model ---------- """
     # Loading the GPT2 model
@@ -390,7 +399,8 @@ if __name__ == "__main__":
         ''' !!! Use `watch -n 0.1 nvidia-smi` in the terminal to monitor the GPU usage !!! '''
         t1 = time()
         dt = (t1 - t0) * 1000
-        print(f"Step {i + 1} of 50. Loss: {loss.item()}. Time: {dt:.2f}ms.")
+        tokens_per_sec = (train_loader.B * train_loader.T) / (dt / 1000)
+        print(f"Step {i + 1} of 50. Loss: {loss.item()}. Time: {dt:.2f}ms. Tokens/sec: {tokens_per_sec:.0f}.")
     t = time() - t
     print(f"Training took {t:.2f}s.")
 
