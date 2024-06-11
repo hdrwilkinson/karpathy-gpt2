@@ -270,13 +270,25 @@ class GPT(nn.Module):
     
 
 if __name__ == "__main__":
-    # Detecting the device
+    """ ---------- Detecting the device ---------- """
     device = "cpu"
     if torch.cuda.is_available(): # Check if GPU is available
         device = "cuda"
     elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available(): # Check if MPS is available (for M1 chips)
         device = "mps"
     print(f"Using device: {device}")
+
+    """ ---------- Getting a data batch ---------- """
+    import tiktoken
+    enc = tiktoken.get_encoding("gpt2")
+    with open("data/input.txt", "r") as f:
+        text = f.read()
+    text = text[:1024]
+    tokens = enc.encode(text)
+    B, T = 4, 32
+    buffer = torch.tensor(tokens[:B*T], dtype=torch.long)
+    x = buffer[:-1].view(B, T)
+    y = buffer[1:].view(B, T)
 
     """ ---------- Loading the model ---------- """
     # Loading the GPT2 model
