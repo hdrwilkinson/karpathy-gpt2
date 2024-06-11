@@ -392,7 +392,7 @@ if __name__ == "__main__":
         like FP32 and TF32 but with lower precision, providing fast computations while still 
         covering a broad range of values. BF16 is efficient for training large models where extreme precision is less crucial.
     """
-    torch.set_float32_matmul_precision('medium') # Highest, High or Medium
+    torch.set_float32_matmul_precision('high') # Highest, High or Medium
 
     """ ---------- Loading the model ---------- """
     # Loading the GPT2 model
@@ -412,7 +412,8 @@ if __name__ == "__main__":
         x, y = train_loader.next_batch()
         x, y = x.to(device), y.to(device)
         optimizer.zero_grad() # Zero the gradients - Why? Because PyTorch accumulates the gradients on subsequent backward passes
-        logits, loss = model(x, y)
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+            logits, loss = model(x, y)
         loss.backward()
         optimizer.step()
         torch.cuda.synchronize() # Wait for the GPU to finish
