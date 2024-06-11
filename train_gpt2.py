@@ -6,6 +6,8 @@ from torch.nn import functional as F # This is the module that contains the acti
 import math
 import tiktoken
 
+from time import time
+
 # ----------------------------------------------------------------------------------------------------------------------
 
 def compare_state_dicts(state_dict, hf_state_dict):
@@ -360,7 +362,7 @@ if __name__ == "__main__":
         torch.cuda.manual_seed(1337)
 
     """ ---------- Getting a data batch ---------- """
-    train_loader = DataLoaderLite(B=4, T=32)
+    train_loader = DataLoaderLite(B=16, T=64) # Batch size (same) and sequence length ^
 
 
     """ ---------- Loading the model ---------- """
@@ -375,14 +377,22 @@ if __name__ == "__main__":
 
     """ ---------- Optimizer and training ---------- """
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+    t = time()
     for i in range(50):
+        t0 = time()
         x, y = train_loader.next_batch()
         x, y = x.to(device), y.to(device)
         optimizer.zero_grad() # Zero the gradients - Why? Because PyTorch accumulates the gradients on subsequent backward passes
         logits, loss = model(x, y)
         loss.backward()
         optimizer.step()
-        print(f"Step {i + 1} of 50. Loss: {loss.item()}")
+        torch.cuda.synchronize() # Wait for the GPU to finish
+        ''' !!! Use `watch -n 0.1 nvidia-smi` in the terminal to monitor the GPU usage !!! '''
+        t1 = time()
+        dt = (t1 - t0) * 1000
+        print(f"Step {i + 1} of 50. Loss: {loss.item()}. Time: {dt:.2f}ms.")
+    t = time() - t
+    print(f"Training took {t:.2f}s.")
 
 
 
