@@ -272,9 +272,9 @@ class GPT(nn.Module):
 if __name__ == "__main__":
     # Detecting the device
     device = "cpu"
-    if torch.cuda.is_available():
+    if torch.cuda.is_available(): # Check if GPU is available
         device = "cuda"
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available(): # Check if MPS is available (for M1 chips)
         device = "mps"
     print(f"Using device: {device}")
 
