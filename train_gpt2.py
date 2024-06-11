@@ -354,6 +354,11 @@ if __name__ == "__main__":
         device = "mps"
     print(f"Using device: {device}")
 
+    """ ---------- Setting the seed ---------- """
+    torch.manual_seed(1337)
+    if device == "cuda":
+        torch.cuda.manual_seed(1337)
+
     """ ---------- Getting a data batch ---------- """
     train_loader = DataLoaderLite(B=4, T=32)
 
