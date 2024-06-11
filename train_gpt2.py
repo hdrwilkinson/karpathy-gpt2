@@ -401,6 +401,7 @@ if __name__ == "__main__":
     config = GPTConfig()
     model = GPT(config)
     model.to(device)
+    model = torch.compile(model) # Compiles the model for faster computation (takes a while) to set up
     print(model)
     print("Model loaded successfully!")
 
