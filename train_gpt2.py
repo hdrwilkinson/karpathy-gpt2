@@ -90,9 +90,10 @@ class CausalSelfAttention(nn.Module):
         return y
 
     def self_attention(self, q, k, v):
-        B, T, C = q.size()
+        B, nh, T, hs = q.size()
+        C = nh * hs
         # Attention Weights
-        att = (q @ k.transpose(-2, -1)) / (1.0 / math.sqrt(k.size(-1)))
+        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
         # Masking the Attention Weights
         att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
         # Softmax Activation
@@ -194,6 +195,26 @@ class GPT(nn.Module):
         # Output Layer
         self.lm_head = nn.Linear(config.n_embed, config.vocab_size, bias=False)     # Embedding -> Vocab
 
+    def forward(self, idx):
+        B, T = idx.size()
+        assert T <= self.config.block_size, f"Length {T} exceeds block size {self.config.block_size}"
+
+        # Embedding Layer
+        position = torch.arange(T, dtype=torch.long, device=idx.device)
+        position_embed = self.transformer.wpe(position)
+        token_embed = self.transformer.wte(idx)
+        x = token_embed + position_embed
+
+        # Transformer Blocks
+        for block in self.transformer.h:
+            x = block(x)
+
+        # Output Layer
+        x = self.transformer.ln_f(x)
+        logits = self.lm_head(x)
+
+        return logits
+
     @classmethod
     def from_pretrained(cls, model_type: str):
         """Loads pre-trained model weights from Hugging Face."""
@@ -249,6 +270,52 @@ class GPT(nn.Module):
     
 
 if __name__ == "__main__":
+    # Loading the model
     model = GPT.from_pretrained("gpt2")
+    # config = GPTConfig()
+    # model = GPT(config)
     print(model)
     print("Model loaded successfully!")
+
+    """ ---------- Inferencing the model ---------- """
+    # Inference parameters
+    num_return_sequences = 5
+    max_length = 30
+
+    # Setting model to eval and to cuda (if available)
+    model.eval()
+    # model.to('cuda')
+
+    # Prefix tokens
+    import tiktoken
+    enc = tiktoken.get_encoding("gpt2")
+    tokens = enc.encode("Hello, I'm a language model,")
+    tokens = torch.tensor(tokens, dtype=torch.long)
+    tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
+    # x = tokens.to('cuda')
+
+    # Inference
+    torch.manual_seed(42)
+    # torch.cuda.manual_seed(42)  
+    while tokens.size(1) < max_length:
+        with torch.no_grad():
+            print(tokens)
+            logits = model(tokens) # (B, T, vocab_size)
+            # Take the logits at the last position
+            logits = logits [:, -1, :] # (B, vocab_size)
+            # Get the probabilities
+            probs = F.softmax(logits, dim=-1)
+            # Do top-k sampling of 50 (HF pipeline default)
+            topk_probs, topk_indicies = torch.topk(probs, 50, dim=-1) # (B, 50) and (B, 50)
+            # Sample from the top-k
+            ix = torch.multinomial(topk_probs, num_samples=1) # (B, 1)
+            # Gather the corresponding indices
+            xcol = torch.gather(topk_indicies, -1, ix) # (B, 1)
+            # Append to sequence
+            tokens = torch.cat([tokens, xcol], dim=1)
+
+    # Decode the tokens
+    for i in range(num_return_sequences):
+        x = tokens[i, :max_length].tolist()
+        decoded = enc.decode(x)
+        print(">", decoded)
