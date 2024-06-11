@@ -47,6 +47,7 @@ class CausalSelfAttention(nn.Module):
         self.c_attn = nn.Linear(self.n_embed, 3 * self.n_embed)
         # Output Matrix
         self.c_proj = nn.Linear(self.n_embed, self.n_embed)
+        self.c_proj.NANOGPT_SCALE_INIT = 1 # Scale the initialization of the output matrix (to prevent exploding gradients)
         # Regularization
         self.register_buffer("bias", 
             torch.tril(
@@ -198,6 +199,33 @@ class GPT(nn.Module):
 
         # Weight sharing scheme (Token embeddings and output embeddings are shared)
         self.transformer.wte.weight = self.lm_head.weight
+
+        # Initialize parameters
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        std = 0.02
+        if hasattr(module, "NANOGPT_SCALE_INIT"):
+            """
+            Scales the STD by the number of layers to prevent exploding gradients:
+
+            STD grows inside the residual stream i.e. as you go deeper into the network
+            and you sum the input with the output, the STD grows by the number of layers.
+
+            We use 2 because there are both an attention and a feed-forward layer in each block.
+
+            We square root the number of layers because the STD is squared in the forward pass.
+            """
+            std += (2 * self.config.n_layer) ** -0.5 
+        """Initializes the weights of the model."""
+        # If the module is a Linear or Embedding layer
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+
 
     def forward(self, idx, targets=None):
         B, T = idx.size()
