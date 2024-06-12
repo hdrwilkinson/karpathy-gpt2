@@ -86,8 +86,10 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        # Self-Attention
-        y = self.self_attention(q, k, v)
+        # Self-Attention (flash-attention)
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        # Reshaping the Output
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
         # Output Matrix
         y = self.c_proj(y)
 
@@ -104,10 +106,9 @@ class CausalSelfAttention(nn.Module):
         att = F.softmax(att, dim=-1)
         # Weighted Sum
         y = att @ v # (B, nh, T, T) @ (B, nh, T, hs) -> (B, nh, T, hs)
-        # Reshaping the Output
-        y = y.transpose(1, 2).contiguous().view(B, T, C)
 
         return y
+
     
 class MLP(nn.Module):
 
@@ -401,9 +402,35 @@ if __name__ == "__main__":
     config = GPTConfig()
     model = GPT(config)
     model.to(device)
-    model = torch.compile(model) # Compiles the model for faster computation (takes a while) to set up
     print(model)
     print("Model loaded successfully!")
+
+    """ ---------- Compiling the model ---------- 
+    
+    `torch.compile(model)` speeds up computation by optimizing the model's execution 
+    through several techniques:
+
+      - Fusion: Combines multiple operations into a single operation, reducing overhead.
+      - Kernel Optimization: Utilizes optimized low-level GPU kernels for faster execution.
+      - Graph Optimization: Converts dynamic models to static computation graphs, allowing 
+        for better optimization.
+      - Memory Optimization: Reduces redundant memory operations and improves cache usage.
+    
+    These optimizations streamline the model's execution, making it faster and more efficient.
+
+    In simple terms:
+    
+    Using torch.compile(model) makes your model run faster because it transforms the model's 
+    instructions into a super-efficient version that the computer can understand and execute 
+    more quickly. Imagine giving a chef a recipe that's already perfectly planned out, 
+    with all the steps combined in the best order and using the fewest pots and pans. 
+    This way, the chef can cook the meal much faster. Similarly, torch.compile reorganizes 
+    and optimizes the model's instructions, allowing the computer to process them more 
+    quickly and efficiently.
+
+    """
+
+    model = torch.compile(model)
 
     """ ---------- Optimizer and training ---------- """
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
