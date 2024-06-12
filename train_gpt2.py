@@ -768,10 +768,9 @@ if __name__ == "__main__":
         ''' !!! Use `watch -n 0.1 nvidia-smi` in the terminal to monitor the GPU usage !!! '''
         t1 = time()
         dt = (t1 - t0) * 1000
-        tokens_processed = train_loader.B * train_loader.T * grad_accum_steps * ddp_world_size
-        tokens_per_sec = tokens_processed / dt
+        tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps) / (dt / 1000)
         if master_process:
-            print(f"Step {step:5d} | Loss: {loss_accum.item():.6f} | lr {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}")
+            print(f"Step {step + 1:5d} | LR: {lr:.4e} | Norm: {norm:.4f} | Loss: {loss_accum.item():.6f} | Time: {dt:.2f}ms | Tokens/sec: {tokens_per_sec:.0f}")
             with open(log_file, "a") as f:
                 f.write(f"{step} train {loss_accum.item():.6f}\n")
     t = time() - t
