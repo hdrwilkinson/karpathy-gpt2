@@ -164,7 +164,7 @@ class GPTBlock(nn.Module):
 @dataclass
 class GPTConfig:
     block_size: int = 1024      # Number of tokens in each block (or sequence length)
-    vocab_size: int = 50257     # Number of unique tokens in the vocabulary
+    vocab_size: int = 50304     # Number of unique tokens in the vocabulary
     n_layer: int = 12           # Number of layers in the transformer
     n_head: int = 12            # Number of attention heads
     n_embed: int = 768          # Embedding size for each token (otherwise known as channels)
@@ -274,7 +274,7 @@ class GPT(nn.Module):
             "gpt2-large":   dict(n_layer=36, n_head=20, n_embed=1280), # 774M parameters
             "gpt2-xl":      dict(n_layer=48, n_head=25, n_embed=1600), # 1558M parameters
         }[model_type]
-        config_args["vocab_size"] = 50257
+        config_args["vocab_size"] = 50304
         config_args["block_size"] = 1024
 
         # Initialize the GPT model
