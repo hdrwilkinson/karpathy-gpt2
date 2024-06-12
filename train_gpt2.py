@@ -1,13 +1,21 @@
 """Defining the GPT2 model and training loop."""
+import os
 from dataclasses import dataclass
+import math
+import inspect
+from time import time
+
+# Importing the tokenization library
+import tiktoken
+
+# Importing the PyTorch libraries
 import torch
 import torch.nn as nn # This is the module that contains the neural network layers
 from torch.nn import functional as F # This is the module that contains the activation functions
-import math
-import tiktoken
-import inspect
+from torch.distributed import init_process_group, destroy_process_group
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist
 
-from time import time
 
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -339,9 +347,11 @@ class GPT(nn.Module):
     
 class DataLoaderLite:
 
-    def __init__(self, B, T):
+    def __init__(self, B, T, process_rank=0, num_processes=1):
         self.B = B
         self.T = T
+        self.process_rank = process_rank
+        self.num_processes = num_processes
 
         # Load the data
         with open("data/input.txt", "r") as f:
@@ -351,11 +361,11 @@ class DataLoaderLite:
         enc = tiktoken.get_encoding("gpt2")
         tokens = enc.encode(text)
         self.tokens = torch.tensor(tokens, dtype=torch.long)
-        print(f"Number of tokens: {len(self.tokens)}.")
-        print(f"Number of batches: {len(self.tokens) // (B * T)} per Epoch.")
+        print(f"Number of tokens: {len(self.tokens)} pre mini batch.")
+        print(f"Number of mini batches: {len(self.tokens) // (B * T)} per Epoch.")
 
         # state
-        self.current_position = 0
+        self.current_position = self.B * self.T * self.process_rank
 
     def next_batch(self):
         """Returns the next batch of data."""
@@ -367,9 +377,9 @@ class DataLoaderLite:
         batch_y = batch[1:].view(B, T)
 
         # Update the current position
-        self.current_position += B*T
-        if self.current_position + (B*T + 1) > len(self.tokens):
-            self.current_position = 0
+        self.current_position += B * T * self.num_processes
+        if self.current_position + ((B * T * self.num_processes) + 1) > len(self.tokens):
+            self.current_position = self.B * self.T * self.process_rank
 
         return batch_x, batch_y
         
@@ -399,21 +409,33 @@ class LRScheduler:
 
 
 if __name__ == "__main__":
-    """ ---------- Detecting the device ---------- """
-    device = "cpu"
-    if torch.cuda.is_available(): # Check if GPU is available
-        device = "cuda"
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available(): # Check if MPS is available (for M1 chips)
-        device = "mps"
-    print(f"Using device: {device}")
+    """ ---------- Setting up for DDP (Distributed Data Parallel) ---------- """
+    ddp = int(os.environ.get('RANK', -1)) != -1 # Checks if this is a ddp run
+    if ddp:
+        assert torch.cuda.is_available(), "DDP requires CUDA"
+        init_process_group(backends="nccl")
+        ddp_rank = int(os.environ["RANK"]) # Rank of the current process (i.e. 0 = 1st process, 1 = 2nd process, etc.) potentially across multiple nodes
+        ddp_local_rank = int(os.environ["LOCAL_RANK"]) # Used in multi-node settings, it is the rank of the current process on the current node
+        ddp_world_size = int(os.environ["WORLD_SIZE"]) # Number of processes
+        device = f"cuda:{ddp_local_rank}"
+        torch.cuda.set_device(device) # Set the device for the current process
+        master_process = ddp_rank == 0 # Check if this is the master process (arbitrarily chosen as rank 0)
+    else:
+        ddp_rank = 0
+        ddp_local_rank = 0
+        ddp_world_size = 1
+        device = "cpu"
+        if torch.cuda.is_available(): # Check if GPU is available
+            device = "cuda"
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available(): # Check if MPS is available (for M1 chips)
+            device = "mps"
+        print(f"Using device: {device}")
+        master_process = True
 
     """ ---------- Setting the seed ---------- """
     torch.manual_seed(1337)
     if device == "cuda":
         torch.cuda.manual_seed(1337)
-
-    """ ---------- Getting a data batch ---------- """
-    train_loader = DataLoaderLite(B=16, T=64) # Batch size (same) and sequence length ^
 
     """ ---------- Lower precision -> Faster Computation ---------- 
     Range (Exponent):
@@ -479,11 +501,21 @@ if __name__ == "__main__":
     quickly and efficiently.
 
     """
-
     model = torch.compile(model)
+    if ddp:
+        """ Used for backwards pass synchronization.
+        
+        The DistributedDataParallel module is used to parallelize the training of the model across multiple GPUs.
+        It is a wrapper that enables the model to be trained on multiple GPUs in a distributed manner.
+
+        It essentially averages the gradients across all GPUs and then updates the model with the averaged gradients.
+        """
+        model = DDP(model, device_ids=[ddp_local_rank], output_device=device)
+    # Get the raw model (without DDP)
+    raw_model = model.module if ddp else model
 
     """ ---------- Optimizer ---------- """
-    optimizer = model.configure_optimizers(
+    optimizer = raw_model.configure_optimizers(
         lr=3e-4,
         weight_decay=0.1,
         device=device,
@@ -494,17 +526,60 @@ if __name__ == "__main__":
     lr_scheduler = LRScheduler(max_lr=6e-4, warmup_steps=10, max_steps=50)
     print("Learning rate scheduler loaded successfully!")
 
+    """ ---------- Micro-Batching ---------- 
+
+    For each forward pass we accumulate 16 * 64 = 1024 tokens before we do a backward pass.
+    To achieve the desired batch size of 524288 tokens, we need to accumulate the gradients
+    for 512 steps. This is called gradient accumulation.
+    """
+    # total_batch_size = 524288 # 2**19 ~0.5M tokens
+    total_batch_size = 16384
+    B = 16
+    T = 64
+    assert total_batch_size % (B * T * ddp_world_size) == 0, "Total batch size must be divisible by B * T * ddp_world_size"
+    grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
+    if master_process:
+        print(f"Total desired batch size: {total_batch_size}")
+        print(f"Gradient accumulation steps: {grad_accum_steps}")
+    train_loader = DataLoaderLite(
+        B=B, 
+        T=T,
+        process_rank=ddp_rank,
+        num_processes=ddp_world_size,
+    )
+
     """ ---------- Training the model ---------- """
     t = time()
     print("Training the model...")
     for i in range(50):
         t0 = time()
-        x, y = train_loader.next_batch()
-        x, y = x.to(device), y.to(device)
         optimizer.zero_grad() # Zero the gradients - Why? Because PyTorch accumulates the gradients on subsequent backward passes
-        with torch.autocast(device_type=device, dtype=torch.bfloat16):
-            logits, loss = model(x, y)
-        loss.backward()
+        loss_accum = 0.0
+        for micro_step in range(grad_accum_steps):
+            """ This is the training loop.
+            
+            For each micro step required to accumulate the gradients, we:
+                - Load the next batch of data
+                - Forward pass
+                - Calculate the loss
+                - Backward pass
+
+            To calculate the loss, we must remember to divide by the number of gradient accumulation steps.
+            """
+            x, y = train_loader.next_batch()
+            x, y = x.to(device), y.to(device)
+            with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                logits, loss = model(x, y)
+            loss = loss / grad_accum_steps
+            loss_accum += loss.detach()
+            if ddp:
+                # Synchronize the gradients across all processes when a full batch is accumulated
+                # This is a default pytorch variable
+                model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
+            loss.backward()
+        if ddp:
+            # Synchronize the gradients across all processes
+            dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         lr = lr_scheduler.get_lr(i)
         for param_group in optimizer.param_groups:
@@ -514,8 +589,8 @@ if __name__ == "__main__":
         ''' !!! Use `watch -n 0.1 nvidia-smi` in the terminal to monitor the GPU usage !!! '''
         t1 = time()
         dt = (t1 - t0) * 1000
-        tokens_per_sec = (train_loader.B * train_loader.T) / (dt / 1000)
-        print(f"Step {i + 1} of 50 | LR: {lr:.4e}. Norm: {norm:.4f} | Loss: {loss.item():.6f} | Time: {dt:.2f}ms | Tokens/sec: {tokens_per_sec:.0f}")
+        tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps) / (dt / 1000)
+        print(f"Step {i + 1} of 50 | LR: {lr:.4e} | Norm: {norm:.4f} | Loss: {loss_accum.item():.6f} | Time: {dt:.2f}ms | Tokens/sec: {tokens_per_sec:.0f}")
     t = time() - t
     print(f"Training took {t:.2f}s.")
 
