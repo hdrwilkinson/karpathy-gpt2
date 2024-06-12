@@ -618,6 +618,36 @@ if __name__ == "__main__":
                 dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
             if master_process:
                 print(f"validation loss: {val_loss_accum.item():.4f}")
+
+        # Inference
+        if step > 0 and step % 100 == 0:
+            model.eval()
+            num_return_sequences = 5
+            max_length = 64
+
+            import tiktoken
+            enc = tiktoken.get_encoding("gpt2")
+            prefix = "Hello, I'm a language model,"
+            tokens = enc.encode(prefix)
+            tokens = torch.tensor(tokens, dtype=torch.long)
+            tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
+            x = tokens.to(device)
+
+            while x.size(1) < max_length:
+                with torch.no_grad():
+                    logits, _ = model(x)  # (B, T, vocab_size)
+                    logits = logits[:, -1, :]  # (B, vocab_size)
+                    probs = F.softmax(logits, dim=-1)
+                    topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)  # (B, 50) and (B, 50)
+                    ix = torch.multinomial(topk_probs, num_samples=1)  # (B, 1)
+                    xcol = torch.gather(topk_indices, -1, ix)  # (B, 1)
+                    x = torch.cat([x, xcol], dim=1)
+
+            print(f"Step {step + 1} | Inference:")
+            for i in range(num_return_sequences):
+                tokens = x[i, :max_length].tolist()
+                decoded = enc.decode(tokens)
+                print(f"> {decoded}")
             
 
         # Training
