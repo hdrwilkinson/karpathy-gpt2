@@ -631,21 +631,24 @@ if __name__ == "__main__":
             tokens = enc.encode(prefix)
             tokens = torch.tensor(tokens, dtype=torch.long)
             tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
-            x = tokens.to(device)
+            xgen = tokens.to(device)
 
-            while x.size(1) < max_length:
+            sample_rng = torch.Generator(device=device)
+            sample_rng.manual_seed(42 + ddp_rank)
+
+            while xgen.size(1) < max_length:
                 with torch.no_grad():
-                    logits, _ = model(x)  # (B, T, vocab_size)
+                    logits, _ = model(xgen)  # (B, T, vocab_size)
                     logits = logits[:, -1, :]  # (B, vocab_size)
                     probs = F.softmax(logits, dim=-1)
                     topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)  # (B, 50) and (B, 50)
-                    ix = torch.multinomial(topk_probs, num_samples=1)  # (B, 1)
+                    ix = torch.multinomial(topk_probs, num_samples=1, generator=sample_rng)  # (B, 1)
                     xcol = torch.gather(topk_indices, -1, ix)  # (B, 1)
-                    x = torch.cat([x, xcol], dim=1)
+                    xgen = torch.cat([xgen, xcol], dim=1)
 
             print(f"Step {step + 1} | Inference:")
             for i in range(num_return_sequences):
-                tokens = x[i, :max_length].tolist()
+                tokens = xgen[i, :max_length].tolist()
                 decoded = enc.decode(tokens)
                 print(f"> {decoded}")
             
@@ -691,48 +694,4 @@ if __name__ == "__main__":
         print(f"Step {step + 1:5d} | LR: {lr:.4e} | Norm: {norm:.4f} | Loss: {loss_accum.item():.6f} | Time: {dt:.2f}ms | Tokens/sec: {tokens_per_sec:.0f}")
     t = time() - t
     print(f"Training took {t:.2f}s.")
-
-
-
-    import sys; sys.exit() # Ignores the rest of the code
-
-    """ ---------- Inferencing the model ---------- """
-    # Inference parameters
-    num_return_sequences = 5
-    max_length = 30
-
-    # Setting model to eval and to cuda (if available)
-    model.eval()
-
-    # Prefix tokens
-    import tiktoken
-    enc = tiktoken.get_encoding("gpt2")
-    tokens = enc.encode("Hello, I'm a language model,")
-    tokens = torch.tensor(tokens, dtype=torch.long)
-    tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
-    x = tokens.to(device)
-
-    # Inference
-    torch.manual_seed(42)
-    # torch.cuda.manual_seed(42)  
-    while x.size(1) < max_length:
-        with torch.no_grad():
-            logits = model(x) # (B, T, vocab_size)
-            # Take the logits at the last position
-            logits = logits [:, -1, :] # (B, vocab_size)
-            # Get the probabilities
-            probs = F.softmax(logits, dim=-1)
-            # Do top-k sampling of 50 (HF pipeline default)
-            topk_probs, topk_indicies = torch.topk(probs, 50, dim=-1) # (B, 50) and (B, 50)
-            # Sample from the top-k
-            ix = torch.multinomial(topk_probs, num_samples=1) # (B, 1)
-            # Gather the corresponding indices
-            xcol = torch.gather(topk_indicies, -1, ix) # (B, 1)
-            # Append to sequence
-            x = torch.cat([x, xcol], dim=1)
-
-    # Decode the tokens
-    for i in range(num_return_sequences):
-        tokens = x[i, :max_length].tolist()
-        decoded = enc.decode(tokens)
-        print(">", decoded)
+    
