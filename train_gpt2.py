@@ -5,6 +5,7 @@ import torch.nn as nn # This is the module that contains the neural network laye
 from torch.nn import functional as F # This is the module that contains the activation functions
 import math
 import tiktoken
+import inspect
 
 from time import time
 
@@ -312,6 +313,30 @@ class GPT(nn.Module):
 
         return model
     
+    def configure_optimizers(self, weight_decay, lr, device):
+        """Configures the optimizer."""
+        # All candidate parameters of the model that require gradients
+        param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
+        # Create optim groups
+        # Parameters that are 2D will be weight decayed, else no weight decay
+        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+        no_decay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+        optim_groups = [
+            {"params": decay_params, "weight_decay": weight_decay},
+            {"params": no_decay_params, "weight_decay": 0.0},
+        ]
+        num_decay_params = sum(p.numel() for p in decay_params)
+        num_no_decay_params = sum(p.numel() for p in no_decay_params)
+        print(f"Number of decayed parameter tensors: {len(decay_params)} with {num_decay_params:,} parameters.")
+        print(f"Number of non-decayed parameter tensors: {len(no_decay_params)} with {num_no_decay_params:,} parameters.")
+        # Create the optimizer
+        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_available and "cuda" in device
+        print(f"Using {'fused' if use_fused else 'unfused'} AdamW.")
+        optimizer = torch.optim.AdamW(optim_groups, lr=lr, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
+        return optimizer
+
+    
 class DataLoaderLite:
 
     def __init__(self, B, T):
@@ -458,12 +483,10 @@ if __name__ == "__main__":
     model = torch.compile(model)
 
     """ ---------- Optimizer ---------- """
-    optimizer = torch.optim.AdamW(
-        model.parameters(), 
-        betas=(0.9, 0.95),
-        eps=1e-8,
+    optimizer = model.configure_optimizers(
         lr=3e-4,
         weight_decay=0.1,
+        device=device,
     )
     print("Optimizer loaded successfully!")
 
@@ -492,7 +515,7 @@ if __name__ == "__main__":
         t1 = time()
         dt = (t1 - t0) * 1000
         tokens_per_sec = (train_loader.B * train_loader.T) / (dt / 1000)
-        print(f"Step {i + 1} of 50 | LR: {lr:.6f}. Norm: {norm:.4f} | Loss: {loss.item():.6f} | Time: {dt:.2f}ms | Tokens/sec: {tokens_per_sec:.0f}")
+        print(f"Step {i + 1} of 50 | LR: {lr:.4e}. Norm: {norm:.4f} | Loss: {loss.item():.6f} | Time: {dt:.2f}ms | Tokens/sec: {tokens_per_sec:.0f}")
     t = time() - t
     print(f"Training took {t:.2f}s.")
 
