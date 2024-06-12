@@ -463,6 +463,7 @@ if __name__ == "__main__":
     batch_size = 64
     sequence_length = 1024
     val_loss_steps = 20
+    checkpoint_steps = 5000
 
 
     """ ---------- Setting up for DDP (Distributed Data Parallel) ---------- """
@@ -659,6 +660,16 @@ if __name__ == "__main__":
                 print(f"validation loss: {val_loss_accum.item():.4f}")
                 with open(log_file, "a") as f:
                     f.write(f"{step} val {val_loss_accum.item():.4f}\n")
+                if step > 0 and (step % checkpoint_steps == 0 or last_step):
+                    checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
+                    checkpoint = {
+                        "model": raw_model.state_dict(),
+                        "config": raw_model.config,
+                        "step": step,
+                        "val_loss": val_loss_accum.item(),
+                        "optimizer": optimizer.state_dict(),
+                    }
+                    torch.save(checkpoint, checkpoint_path)
 
         # once in a while evaluate hellaswag
         if ((step > 0 and step % 250 == 0) or last_step) and (not use_compile):
