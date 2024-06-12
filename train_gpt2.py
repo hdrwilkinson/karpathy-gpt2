@@ -7,6 +7,7 @@ from time import time
 
 # Importing the tokenization library
 import tiktoken
+import numpy as np
 
 # Importing the PyTorch libraries
 import torch
@@ -343,29 +344,41 @@ class GPT(nn.Module):
         print(f"Using {'fused' if use_fused else 'unfused'} AdamW.")
         optimizer = torch.optim.AdamW(optim_groups, lr=lr, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
         return optimizer
-
     
 class DataLoaderLite:
 
-    def __init__(self, B, T, process_rank=0, num_processes=1):
+    def __init__(self, B, T, process_rank=0, num_processes=1, split="train"):
         self.B = B
         self.T = T
         self.process_rank = process_rank
         self.num_processes = num_processes
 
-        # Load the data
-        with open("data/input.txt", "r") as f:
-            text = f.read()
+        # Check if the split is valid
+        assert split in ("train", "val"), f"Invalid split: {split}"
 
-        # Tokenize the data
-        enc = tiktoken.get_encoding("gpt2")
-        tokens = enc.encode(text)
-        self.tokens = torch.tensor(tokens, dtype=torch.long)
-        print(f"Number of tokens: {len(self.tokens)} pre mini batch.")
-        print(f"Number of mini batches: {len(self.tokens) // (B * T)} per Epoch.")
+        # get the shard filenames
+        data_root = "edu_fineweb10B"
+        shards = os.listdir(data_root)
+        shards = [s for s in shards if split in s]
+        shards = sorted(shards)
+        shards = [os.path.join(data_root, s) for s in shards]
+        self.shards = shards
+        assert len(shards) > 0, f"no shards found for split {split}"
 
-        # state
+        if master_process:
+            print(f"Loaded {len(self.tokens)} tokens")
+            print(f"Found {len(shards)} shards for split {split}")
+
+        # state, init at shard zero
+        self.current_shard = 0
+        self.tokens = self.load_tokens(self.shards[self.current_shard])
         self.current_position = self.B * self.T * self.process_rank
+    
+    def load_tokens(filename):
+        """Loads the tokens from a file."""
+        npt = np.load(filename)
+        ptt = torch.tensor(npt, dtype=torch.long)
+        return ptt
 
     def next_batch(self):
         """Returns the next batch of data."""
@@ -376,10 +389,12 @@ class DataLoaderLite:
         batch_x = batch[:-1].view(B, T)
         batch_y = batch[1:].view(B, T)
 
-        # Update the current position
-        self.current_position += B * T * self.num_processes
-        if self.current_position + ((B * T * self.num_processes) + 1) > len(self.tokens):
-            self.current_position = self.B * self.T * self.process_rank
+        # If loading the next batch would be out of bounds, advance to next shard
+        if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens):
+            self.current_position += B * T * self.num_processes
+            self.current_shard = (self.current_shard + 1) % len(self.shards)
+            self.tokens = self.load_tokens(self.shards[self.current_shard])
+            self.current_position = B * T * self.process_rank
 
         return batch_x, batch_y
         
@@ -412,6 +427,7 @@ if __name__ == "__main__":
     """ ---------- Setting up for DDP (Distributed Data Parallel) ---------- """
     ddp = int(os.environ.get('RANK', -1)) != -1 # Checks if this is a ddp run
     if ddp:
+        # Use of DDP demands CUDA, we set the device appropriately according to rank
         assert torch.cuda.is_available(), "DDP requires CUDA"
         init_process_group(backends="nccl")
         ddp_rank = int(os.environ["RANK"]) # Rank of the current process (i.e. 0 = 1st process, 1 = 2nd process, etc.) potentially across multiple nodes
@@ -434,7 +450,7 @@ if __name__ == "__main__":
 
     """ ---------- Setting the seed ---------- """
     torch.manual_seed(1337)
-    if device == "cuda":
+    if "cuda" in device:
         torch.cuda.manual_seed(1337)
 
     """ ---------- Lower precision -> Faster Computation ---------- 
@@ -514,28 +530,30 @@ if __name__ == "__main__":
     # Get the raw model (without DDP)
     raw_model = model.module if ddp else model
 
+    """ ---------- Learning Rate Scheduler ---------- """
+    lr_scheduler = LRScheduler(
+        max_lr=6e-4, 
+        warmup_steps=715, 
+        max_steps=19073)
+    print("Learning rate scheduler loaded successfully!")
+
     """ ---------- Optimizer ---------- """
     optimizer = raw_model.configure_optimizers(
-        lr=3e-4,
+        lr=6e-4,
         weight_decay=0.1,
         device=device,
     )
     print("Optimizer loaded successfully!")
 
-    """ ---------- Learning Rate Scheduler ---------- """
-    lr_scheduler = LRScheduler(max_lr=6e-4, warmup_steps=10, max_steps=50)
-    print("Learning rate scheduler loaded successfully!")
-
     """ ---------- Micro-Batching ---------- 
 
-    For each forward pass we accumulate 16 * 64 = 1024 tokens before we do a backward pass.
-    To achieve the desired batch size of 524288 tokens, we need to accumulate the gradients
-    for 512 steps. This is called gradient accumulation.
+    For each forward pass we accumulate 16 * 64 * WORLD_SIZE tokens before we do a backward pass.
+    This is called gradient accumulation. This is done because the model is too large to fit on a single GPU.
     """
-    # total_batch_size = 524288 # 2**19 ~0.5M tokens
-    total_batch_size = 16384
-    B = 16
-    T = 64
+    total_batch_size = 524288 # 2**19 ~0.5M tokens
+    # total_batch_size = 16384 # 2**14 ~16K tokens to make it managaable
+    B = 64
+    T = 1024
     assert total_batch_size % (B * T * ddp_world_size) == 0, "Total batch size must be divisible by B * T * ddp_world_size"
     grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
     if master_process:
@@ -546,6 +564,7 @@ if __name__ == "__main__":
         T=T,
         process_rank=ddp_rank,
         num_processes=ddp_world_size,
+        split="train"
     )
 
     """ ---------- Training the model ---------- """
@@ -590,7 +609,7 @@ if __name__ == "__main__":
         t1 = time()
         dt = (t1 - t0) * 1000
         tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps) / (dt / 1000)
-        print(f"Step {i + 1} of 50 | LR: {lr:.4e} | Norm: {norm:.4f} | Loss: {loss_accum.item():.6f} | Time: {dt:.2f}ms | Tokens/sec: {tokens_per_sec:.0f}")
+        print(f"Step {i + 1:5d} | LR: {lr:.4e} | Norm: {norm:.4f} | Loss: {loss_accum.item():.6f} | Time: {dt:.2f}ms | Tokens/sec: {tokens_per_sec:.0f}")
     t = time() - t
     print(f"Training took {t:.2f}s.")
 
