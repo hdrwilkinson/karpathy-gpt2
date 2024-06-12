@@ -534,7 +534,10 @@ if __name__ == "__main__":
     quickly and efficiently.
 
     """
-    model = torch.compile(model)
+    use_compile = False # torch.compile interferes with HellaSwag eval and Generation. TODO fix
+    if use_compile:
+        model = torch.compile(model)
+
     if ddp:
         """ Used for backwards pass synchronization.
         
@@ -620,7 +623,7 @@ if __name__ == "__main__":
                 print(f"validation loss: {val_loss_accum.item():.4f}")
 
         # Inference
-        if step > 0 and step % 100 == 0:
+        if step > 0 and step % 100 == 0 and (not use_compile):
             model.eval()
             num_return_sequences = 5
             max_length = 64
@@ -694,4 +697,3 @@ if __name__ == "__main__":
         print(f"Step {step + 1:5d} | LR: {lr:.4e} | Norm: {norm:.4f} | Loss: {loss_accum.item():.6f} | Time: {dt:.2f}ms | Tokens/sec: {tokens_per_sec:.0f}")
     t = time() - t
     print(f"Training took {t:.2f}s.")
-    
