@@ -370,6 +370,9 @@ class DataLoaderLite:
             print(f"Found {len(shards)} shards for split {split}")
 
         # state, init at shard zero
+        self.reset()
+
+    def reset(self):
         self.current_shard = 0
         self.tokens = self.load_tokens(self.shards[self.current_shard])
         self.current_position = self.B * self.T * self.process_rank
@@ -424,6 +427,20 @@ class LRScheduler:
 
 
 if __name__ == "__main__":
+
+    """ ---------- Hyperparameters ---------- """
+    seed = 1337
+    max_lr = 6e-4
+    warmup_steps = 715
+    max_steps = 19073
+    weight_decay = 0.1
+    vocab_size = 50304
+    total_batch_size = 524288 # 2**19 ~0.5M tokens
+    batch_size = 64
+    sequence_length = 1024
+    val_loss_steps = 20
+
+
     """ ---------- Setting up for DDP (Distributed Data Parallel) ---------- """
     ddp = int(os.environ.get('RANK', -1)) != -1 # Checks if this is a ddp run
     if ddp:
@@ -449,9 +466,9 @@ if __name__ == "__main__":
         master_process = True
 
     """ ---------- Setting the seed ---------- """
-    torch.manual_seed(1337)
+    torch.manual_seed(seed)
     if "cuda" in device:
-        torch.cuda.manual_seed(1337)
+        torch.cuda.manual_seed(seed)
 
     """ ---------- Lower precision -> Faster Computation ---------- 
     Range (Exponent):
@@ -532,15 +549,15 @@ if __name__ == "__main__":
 
     """ ---------- Learning Rate Scheduler ---------- """
     lr_scheduler = LRScheduler(
-        max_lr=6e-4, 
-        warmup_steps=715, 
-        max_steps=19073)
+        max_lr=max_lr, 
+        warmup_steps=warmup_steps, 
+        max_steps=max_steps)
     print("Learning rate scheduler loaded successfully!")
 
     """ ---------- Optimizer ---------- """
     optimizer = raw_model.configure_optimizers(
-        lr=6e-4,
-        weight_decay=0.1,
+        lr=max_lr,
+        weight_decay=weight_decay,
         device=device,
     )
     print("Optimizer loaded successfully!")
@@ -550,15 +567,17 @@ if __name__ == "__main__":
     For each forward pass we accumulate 16 * 64 * WORLD_SIZE tokens before we do a backward pass.
     This is called gradient accumulation. This is done because the model is too large to fit on a single GPU.
     """
-    total_batch_size = 524288 # 2**19 ~0.5M tokens
+    total_batch_size = total_batch_size # 2**19 ~0.5M tokens
     # total_batch_size = 16384 # 2**14 ~16K tokens to make it managaable
-    B = 64
-    T = 1024
+    B = batch_size
+    T = sequence_length
     assert total_batch_size % (B * T * ddp_world_size) == 0, "Total batch size must be divisible by B * T * ddp_world_size"
     grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
     if master_process:
         print(f"Total desired batch size: {total_batch_size}")
         print(f"Gradient accumulation steps: {grad_accum_steps}")
+
+    """ ---------- Data Loader ---------- """
     train_loader = DataLoaderLite(
         B=B, 
         T=T,
@@ -566,12 +585,42 @@ if __name__ == "__main__":
         num_processes=ddp_world_size,
         split="train"
     )
+    val_loader = DataLoaderLite(
+        B=B,
+        T=T,
+        process_rank=ddp_rank,
+        num_processes=ddp_world_size,
+        split="val"
+    )
+    print("Data loaders (train and val) loaded successfully!")
+
 
     """ ---------- Training the model ---------- """
     t = time()
     print("Training the model...")
-    for i in range(50):
+    for step in range(max_steps):
         t0 = time()
+
+        # Evaluation
+        if step % 100 == 0:
+            model.eval()
+            val_loader.reset()
+            with torch.no_grad():
+                val_loss_accum = 0.0
+                for _ in range(val_loss_steps):
+                    x, y = val_loader.next_batch()
+                    x, y = x.to(device), y.to(device)
+                    with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                        logits, loss = model(x, y)
+                    loss = loss / val_loss_steps
+                    val_loss_accum += loss.detach()
+            if ddp:
+                dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
+            if master_process:
+                print(f"validation loss: {val_loss_accum.item():.4f}")
+            
+
+        # Training
         optimizer.zero_grad() # Zero the gradients - Why? Because PyTorch accumulates the gradients on subsequent backward passes
         loss_accum = 0.0
         for micro_step in range(grad_accum_steps):
@@ -600,7 +649,7 @@ if __name__ == "__main__":
             # Synchronize the gradients across all processes
             dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        lr = lr_scheduler.get_lr(i)
+        lr = lr_scheduler.get_lr(step)
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
         optimizer.step()
@@ -609,7 +658,7 @@ if __name__ == "__main__":
         t1 = time()
         dt = (t1 - t0) * 1000
         tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps) / (dt / 1000)
-        print(f"Step {i + 1:5d} | LR: {lr:.4e} | Norm: {norm:.4f} | Loss: {loss_accum.item():.6f} | Time: {dt:.2f}ms | Tokens/sec: {tokens_per_sec:.0f}")
+        print(f"Step {step + 1:5d} | LR: {lr:.4e} | Norm: {norm:.4f} | Loss: {loss_accum.item():.6f} | Time: {dt:.2f}ms | Tokens/sec: {tokens_per_sec:.0f}")
     t = time() - t
     print(f"Training took {t:.2f}s.")
 
