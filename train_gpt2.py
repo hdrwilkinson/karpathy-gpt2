@@ -347,6 +347,31 @@ class DataLoaderLite:
             self.current_position = 0
 
         return batch_x, batch_y
+        
+
+class LRScheduler:
+
+    def __init__(self, max_lr = 3e-4, warmup_steps = 10, max_steps = 50):
+        self.max_lr = max_lr
+        self.min_lr = max_lr * 0.1
+        self.warmup_steps = warmup_steps
+        self.max_steps = max_steps
+
+    def get_lr(self, step):
+        """Linear warmup and cosine decay."""
+        # Linear warmup
+        if step < self.warmup_steps:
+            return self.max_lr * ((step + 1) / self.warmup_steps)
+        # Cosine decay
+        elif step < self.max_steps:
+            decay_ratio = (step - self.warmup_steps) / (self.max_steps - self.warmup_steps)
+            assert 0 <= decay_ratio <= 1
+            coefficient = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+            return self.min_lr + coefficient * (self.max_lr - self.min_lr)
+        # Minimum learning rate
+        else:
+            return self.min_lr
+
 
 if __name__ == "__main__":
     """ ---------- Detecting the device ---------- """
@@ -432,9 +457,23 @@ if __name__ == "__main__":
 
     model = torch.compile(model)
 
-    """ ---------- Optimizer and training ---------- """
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+    """ ---------- Optimizer ---------- """
+    optimizer = torch.optim.AdamW(
+        model.parameters(), 
+        betas=(0.9, 0.95),
+        eps=1e-8,
+        lr=3e-4,
+        weight_decay=0.1,
+    )
+    print("Optimizer loaded successfully!")
+
+    """ ---------- Learning Rate Scheduler ---------- """
+    lr_scheduler = LRScheduler(max_lr=6e-4, warmup_steps=10, max_steps=50)
+    print("Learning rate scheduler loaded successfully!")
+
+    """ ---------- Training the model ---------- """
     t = time()
+    print("Training the model...")
     for i in range(50):
         t0 = time()
         x, y = train_loader.next_batch()
@@ -443,13 +482,17 @@ if __name__ == "__main__":
         with torch.autocast(device_type=device, dtype=torch.bfloat16):
             logits, loss = model(x, y)
         loss.backward()
+        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        lr = lr_scheduler.get_lr(i)
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = lr
         optimizer.step()
         torch.cuda.synchronize() # Wait for the GPU to finish
         ''' !!! Use `watch -n 0.1 nvidia-smi` in the terminal to monitor the GPU usage !!! '''
         t1 = time()
         dt = (t1 - t0) * 1000
         tokens_per_sec = (train_loader.B * train_loader.T) / (dt / 1000)
-        print(f"Step {i + 1} of 50. Loss: {loss.item()}. Time: {dt:.2f}ms. Tokens/sec: {tokens_per_sec:.0f}.")
+        print(f"Step {i + 1} of 50 | LR: {lr:.6f}. Norm: {norm:.4f} | Loss: {loss.item():.6f} | Time: {dt:.2f}ms | Tokens/sec: {tokens_per_sec:.0f}")
     t = time() - t
     print(f"Training took {t:.2f}s.")
 
